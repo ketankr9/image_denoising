@@ -3,3 +3,4 @@ __pycache__/
 *.ARW
 *.pth
 outputs
+test_job
