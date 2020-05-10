@@ -1,27 +1,35 @@
-import os,time,scipy.io
+import os,time
 
 import numpy as np
 import rawpy
-import glob
+import glob, scipy.io
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from tensorboardX import SummaryWriter
-from model import SeeInDark
 
+from model import SeeInDark
+from net_canny import Net
+from pytorch_msssim import MSSSIM
+
+saveimg = True
+ps = 512 #patch size for training
+device = torch.device('cuda') #'cuda:'+os.environ['CUDA']#torch.device('cuda') #if torch.cuda.is_available() else 'cpu')
 DIR = '/home/cse/ug/15074014/'
+if os.environ["USER"] == "ketankr9":
+    DIR = '/home/ketankr9/workspace/mtp/codes/'
+    device = torch.device('cpu')
+    ps = 256
 input_dir = DIR + 'Sony/short/'
 gt_dir = DIR + 'Sony/long/'
-result_dir = DIR + 'Sony/result_Sony_color_vgg_mse/'
-model_dir =  DIR + 'Sony/result_Sony_color_vgg_mse/'
+result_dir = model_dir = DIR + 'Sony/result_Sony_edge_psnr_ssim/'
 
 os.system('mkdir -p '+result_dir)
 chpkdir = model_dir+'checkpoint_sony_resume.pth'
 
 writer = SummaryWriter(result_dir+'log')
 
-device = torch.device('cuda') #'cuda:'+os.environ['CUDA']#torch.device('cuda') #if torch.cuda.is_available() else 'cpu')
 print(device)
 
 #get train and test IDs
@@ -39,7 +47,7 @@ for i in range(len(test_fns)):
 
 
 
-ps = 512 #patch size for training
+
 save_freq = 100
 
 DEBUG = 0
@@ -64,17 +72,46 @@ def pack_raw(raw):
                        im[1:H:2,0:W:2,:]), axis=2)
     return out
 
+# LOSS REDUCED MEAN
+mseclass = nn.MSELoss(reduction='mean')
 def reduce_mean(out_im, gt_im):
-    return torch.abs(out_im - gt_im).mean()
+    return mseclass(out_im, gt_im)
 
+# LOSS VGG
 from utils import VGGLoss, GaussianSmoothing
 vggloss = VGGLoss(device=device)
 gaussianSmoothing = GaussianSmoothing(3, 5, 1, device=device)
 
+# LOSS COLORLOSS
 def colorloss(out, gt):
     out = gaussianSmoothing(out)
     gt  = gaussianSmoothing(gt)
     return torch.abs(out-gt).mean()
+
+# MSSSIM
+msssim = MSSSIM().to(device)
+
+# LOSS CANNY
+canny = Net(threshold=3.0, device=device).to(device)
+canny.eval()
+def canny_loss(out_im, gt_im, ch=""):
+    blurred_img1, grad_mag1, grad_orientation1, thin_edges1, thresholded1, early_threshold1 = canny(gt_im)
+    blurred_img2, grad_mag2, grad_orientation2, thin_edges2, thresholded2, early_threshold2 = canny(out_im)
+
+    if ch == '1':
+        return mseclass(thresholded1, thresholded2)
+    elif ch == '1bool':
+        return mseclass(thresholded1!=zero, thresholded2!=zero)
+    elif ch == '2':
+        return mseclass(early_threshold1, early_threshold2)
+    elif ch == '2bool':
+        return mseclass(early_threshold1!=zero, early_threshold2!=zero)
+    elif ch == '3':
+        return mseclass(thresholded1, thresholded2) + mseclass(early_threshold1, early_threshold2)
+    elif ch == '3bool':
+        return mseclass(thresholded1!=zero, thresholded2!=zero) + mseclass(early_threshold1!=zero, early_threshold2!=zero)
+
+    return mseclass(thresholded1/(thresholded1.max()+1), thresholded2/(thresholded2.max()+1))
 
 #Raw data takes long time to load. Keep them in memory after loaded.
 gt_images=[None]*6000
@@ -164,25 +201,31 @@ for epoch in range(lastepoch,4001):
         model.zero_grad()
         out_img = model(in_img)
 
-        c_loss = colorloss(out_img, gt_img)
-        vgg_loss = vggloss.loss(out_img, gt_img)
-        mse_loss = reduce_mean(out_img, gt_img)
+        # c_loss = colorloss(out_img, gt_img)
+        # vgg_loss = vggloss.loss(out_img, gt_img)
+        # mse_loss = reduce_mean(out_img, gt_img)
+        # loss = c_loss + vgg_loss + mse_loss
 
-        loss = c_loss + vgg_loss + mse_loss
+        alpha, beta = 0.8, 0.1
+        can_loss = (1-alpha-beta)*canny_loss(out_img, gt_img)
+        mse_loss = alpha*reduce_mean(out_img, gt_img)
+        msssim_loss = beta*(1-msssim(out_img, gt_img))
+        loss = mse_loss + can_loss + msssim_loss
+
         loss.backward()
 
         opt.step()
         g_loss[ind]=loss.item()
-        out=("%d %d C:%.3f V:%.3f R:%.3f Loss=%.3f Time=%.3f"%(epoch,cnt,c_loss, vgg_loss, mse_loss, np.mean(g_loss[np.where(g_loss)]),time.time()-st))
+        out=("%d %d C:%.3f S:%.3f P:%.3f Loss=%.3f Time=%.3f"%(epoch,cnt,can_loss, msssim_loss, mse_loss, np.mean(g_loss[np.where(g_loss)]),time.time()-st))
         print(out)
         try:
             os.system('echo ' + out + ' >> '+result_dir+'jobout.txt')
         except:
             pass
-        E_loss = {'vgg':0, 'c_loss':0, 'mse':0, 'total':0}
-        E_loss['vgg'] += vgg_loss
-        E_loss['mse'] += mse_loss
-        E_loss['c_loss'] += c_loss
+        E_loss = {'CANNY':0, 'MSE':0, 'MSSSIM':0, 'total':0}
+        E_loss['CANNY'] += can_loss
+        E_loss['MSE'] += mse_loss
+        E_loss['MSSSIM'] += msssim_loss
         E_loss['total'] += np.mean(g_loss[np.where(g_loss)])
 
         if epoch%save_freq==0:
@@ -191,17 +234,18 @@ for epoch in range(lastepoch,4001):
             output = out_img.permute(0, 2, 3, 1).cpu().data.numpy()
             output = np.minimum(np.maximum(output,0),1)
 
-            temp = np.concatenate((gt_patch[0,:,:,:], output[0,:,:,:]),axis=1)
-            scipy.misc.toimage(temp*255,  high=255, low=0, cmin=0, cmax=255).save(result_dir + '%04d/%05d_00_train_%d.jpg'%(epoch,train_id,ratio))
-            # torch.save(model.state_dict(), model_dir+'checkpoint_sony_e%04d.pth'%epoch)
+            if saveimg:
+                temp = np.concatenate((gt_patch[0,:,:,:], output[0,:,:,:]),axis=1)
+                # scipy.misc.toimage(temp*255,  high=255, low=0, cmin=0, cmax=255).save(result_dir + '%04d/%05d_00_train_%d.jpg'%(epoch,train_id,ratio))
+                # torch.save(model.state_dict(), model_dir+'checkpoint_sony_e%04d.pth'%epoch)
     
     torch.save({'epoch': epoch, \
         'model': model.state_dict(), \
         'optimizer': opt.state_dict(),\
         }, model_dir+'checkpoint_sony_resume.pth')
 
-    writer.add_scalar('Loss/VGG', E_loss['vgg'], epoch)
-    writer.add_scalar('Loss/Color', E_loss['c_loss'], epoch)
-    writer.add_scalar('Loss/RMean', E_loss['mse'], epoch)
+    writer.add_scalar('Loss/Edge', E_loss['CANNY'], epoch)
+    writer.add_scalar('Loss/MSSSIM', E_loss['MSSSIM'], epoch)
+    writer.add_scalar('Loss/RMean', E_loss['MSE'], epoch)
     writer.add_scalar('LossTotal', E_loss['total'], epoch)
 
