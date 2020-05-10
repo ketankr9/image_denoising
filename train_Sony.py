@@ -143,7 +143,7 @@ for epoch in range(lastepoch,4001):
         for g in opt.param_groups:
             g['lr'] = 1e-5
 
-    E_loss = {'vgg':0, 'c_loss':0, 'mse':0, 'total':0}
+    E_loss = {'CANNY':0, 'MSE':0, 'MSSSIM':0, 'total':0}
     for ind in np.random.permutation(len(train_ids)):
         # get the path from image id
         train_id = train_ids[ind]
@@ -222,7 +222,7 @@ for epoch in range(lastepoch,4001):
             os.system('echo ' + out + ' >> '+result_dir+'jobout.txt')
         except:
             pass
-        E_loss = {'CANNY':0, 'MSE':0, 'MSSSIM':0, 'total':0}
+        # E_loss = {'CANNY':0, 'MSE':0, 'MSSSIM':0, 'total':0}
         E_loss['CANNY'] += can_loss
         E_loss['MSE'] += mse_loss
         E_loss['MSSSIM'] += msssim_loss
