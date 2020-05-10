@@ -1,0 +1,8 @@
+#!/bin/bash
+#PBS -l select=ncpus=2:mem=10gb:ngpus=1
+#PBS -q gpu
+module load cuda/10.0
+module load anaconda/3
+source activate torch3
+python /home/cse/ug/15074014/image_denoising/train_Sony.py
+source deactivate
