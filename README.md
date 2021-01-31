@@ -1,5 +1,5 @@
 # Pytorch-Learning-to-See-in-the-Dark
-Learning to See in the Dark using pytorch 0.4.0
+Learning to See in the Dark using Pytorch 0.4.0
 
 ### Original tensorflow version
 Chen Chen, Qifeng Chen, Jia Xu, and Vladlen Koltun, "Learning to See in the Dark", in CVPR, 2018. <br/>
